@@ -1,0 +1,17 @@
+Collecting textblob
+  Using cached textblob-0.19.0-py3-none-any.whl.metadata (4.4 kB)
+Collecting nltk>=3.9 (from textblob)
+  Using cached nltk-3.9.1-py3-none-any.whl.metadata (2.9 kB)
+Requirement already satisfied: click in ./venv/lib/python3.13/site-packages (from nltk>=3.9->textblob) (8.2.1)
+Requirement already satisfied: joblib in ./venv/lib/python3.13/site-packages (from nltk>=3.9->textblob) (1.5.1)
+Collecting regex>=2021.8.3 (from nltk>=3.9->textblob)
+  Using cached regex-2024.11.6-cp313-cp313-macosx_11_0_arm64.whl.metadata (40 kB)
+Collecting tqdm (from nltk>=3.9->textblob)
+  Using cached tqdm-4.67.1-py3-none-any.whl.metadata (57 kB)
+Using cached textblob-0.19.0-py3-none-any.whl (624 kB)
+Using cached nltk-3.9.1-py3-none-any.whl (1.5 MB)
+Using cached regex-2024.11.6-cp313-cp313-macosx_11_0_arm64.whl (284 kB)
+Using cached tqdm-4.67.1-py3-none-any.whl (78 kB)
+Installing collected packages: tqdm, regex, nltk, textblob
+
+Successfully installed nltk-3.9.1 regex-2024.11.6 textblob-0.19.0 tqdm-4.67.1
