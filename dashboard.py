@@ -15,6 +15,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from wordcloud import WordCloud
 import warnings
+import io
 warnings.filterwarnings('ignore')
 
 # Environment Variables laden
@@ -54,6 +55,57 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Performance-Optimierungen
+import streamlit.runtime.caching.hashing as hash_funcs
+
+# Session State für Performance
+if 'data_loaded' not in st.session_state:
+    st.session_state.data_loaded = False
+if 'processed_data' not in st.session_state:
+    st.session_state.processed_data = pd.DataFrame()
+if 'last_file_hash' not in st.session_state:
+    st.session_state.last_file_hash = None
+
+# Performance-Konfiguration
+CHUNK_SIZE = 1000  # Chunk-Größe für große Datasets
+MAX_MEMORY_MB = 500  # Maximaler Speicherverbrauch in MB
+TIMEOUT_SECONDS = 120  # Timeout für datenintensive Operationen
+
+# Threading-basiertes Timeout für Streamlit-Kompatibilität
+import threading
+import functools
+import time
+
+def streamlit_timeout_decorator(seconds):
+    """Streamlit-kompatibles Timeout mit Threading"""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            result = [None]
+            exception = [None]
+            
+            def target():
+                try:
+                    result[0] = func(*args, **kwargs)
+                except Exception as e:
+                    exception[0] = e
+            
+            thread = threading.Thread(target=target)
+            thread.daemon = True
+            thread.start()
+            thread.join(timeout=seconds)
+            
+            if thread.is_alive():
+                st.error(f"⏰ Operation abgebrochen nach {seconds}s Timeout. Versuchen Sie Cache zu leeren oder weniger Daten zu verarbeiten.")
+                return None
+            
+            if exception[0]:
+                raise exception[0]
+            
+            return result[0]
+        return wrapper
+    return decorator
 
 # Custom CSS für Executive Dashboard Design
 st.markdown("""
@@ -271,7 +323,7 @@ class SchulqualitätsDashboard:
         self.data = None
         self.processed_data = pd.DataFrame()
         self.metadata = pd.DataFrame()
-        self.ki_analyzer = KI_Schulqualitäts_Analyzer()
+        self.ki_analyzer = None  # Wird bei Bedarf initialisiert
         self.openai_client = None
         self.setup_openai()
     
@@ -304,14 +356,47 @@ class SchulqualitätsDashboard:
         # Fallback: aktuelles Datum
         return pd.to_datetime("today")
     
+    def _process_excel_file(self, file_content, filename):
+        """Excel-Verarbeitung ohne Caching (wegen Streamlit-Kompatibilität)"""
+        try:
+            excel_data = pd.read_excel(io.BytesIO(file_content), sheet_name=None)
+            return excel_data
+        except Exception as e:
+            st.error(f"Fehler beim Lesen von {filename}: {e}")
+            return None
+    
     def load_excel_files(self, uploaded_files):
-        """Lädt und verarbeitet IQES Excel-Dateien"""
-        all_data = []
+        """Lädt und verarbeitet IQES Excel-Dateien mit Performance-Optimierung"""
+        # File Hash für Cache-Invalidierung
+        import hashlib
+        file_hash = hashlib.md5()
+        for f in uploaded_files:
+            file_hash.update(f.name.encode())
+        current_hash = file_hash.hexdigest()
         
-        for uploaded_file in uploaded_files:
+        # Session State für Performance prüfen
+        if (st.session_state.get('data_loaded', False) and 
+            st.session_state.get('last_file_hash') == current_hash and
+            'processed_data' in st.session_state and 
+            not st.session_state.processed_data.empty):
+            self.processed_data = st.session_state.processed_data
+            st.success("✅ Daten aus Cache geladen (Performance-Optimierung)")
+            return True
+        
+        all_data = []
+        progress_bar = st.progress(0)
+        
+        for i, uploaded_file in enumerate(uploaded_files):
             try:
-                # Excel-Datei laden - alle Blätter
-                excel_data = pd.read_excel(uploaded_file, sheet_name=None)
+                # Progress anzeigen
+                progress_bar.progress((i + 1) / len(uploaded_files))
+                
+                # Cache-fähige Excel-Verarbeitung
+                file_content = uploaded_file.read()
+                excel_data = self._process_excel_file(file_content, uploaded_file.name)
+                
+                if excel_data is None:
+                    continue
                 
                 # Datum aus Dateiname extrahieren
                 eval_date = self.extract_date_from_filename(uploaded_file.name)
@@ -337,15 +422,48 @@ class SchulqualitätsDashboard:
                 processed_data = self.process_iqes_file(excel_data, eval_date, bildungsgang, eval_type, uploaded_file.name, metadata)
                 if not processed_data.empty:
                     all_data.append(processed_data)
+                    
+                # Memory cleanup
+                del excel_data
                         
             except Exception as e:
                 st.error(f"Fehler beim Laden von {uploaded_file.name}: {str(e)}")
                 continue
         
+        # Progress Bar entfernen
+        progress_bar.empty()
+        
         if all_data:
             self.processed_data = pd.concat(all_data, ignore_index=True)
+            
+            # Datenqualität sicherstellen
+            self.processed_data = self.clean_data(self.processed_data)
+            
+            # In Session State cachen
+            st.session_state.processed_data = self.processed_data
+            st.session_state.data_loaded = True
+            st.session_state.last_file_hash = current_hash
+            
             return True
         return False
+    
+    def clean_data(self, data):
+        """Datenqualität sicherstellen"""
+        if data.empty:
+            return data
+            
+        # Duplikate entfernen
+        data = data.drop_duplicates()
+        
+        # Nur valide Bewertungen behalten
+        if 'Bewertung' in data.columns:
+            data = data[(data['Bewertung'] >= 1) & (data['Bewertung'] <= 4)]
+        
+        # Leer-Strings in Fragen entfernen
+        if 'Frage' in data.columns:
+            data = data[data['Frage'].str.strip() != '']
+        
+        return data
     
     def extract_metadata(self, general_info_df):
         """Extrahiert Metadaten aus dem 'Allgemeine Angaben' Blatt"""
@@ -1207,16 +1325,11 @@ class SchulqualitätsDashboard:
                     trend_df = pd.DataFrame(trend_summary)
                     st.dataframe(trend_df, use_container_width=True, hide_index=True)
     
-    def create_rankings_visualization(self, data):
-        """Erstellt Top/Bottom Rankings für kritische Bereiche"""
-        if data.empty or 'Bewertung' not in data.columns:
-            st.warning("Keine Bewertungsdaten für Rankings verfügbar.")
-            return
-        
+    def _calculate_rankings_data(self, data):
+        """Berechnung der Rankings ohne Caching"""
         scale_data = data[data['Fragentyp'] == 'Antwortskala'].copy()
         if scale_data.empty:
-            st.info("Keine Antwortskala-Daten für Rankings verfügbar.")
-            return
+            return pd.DataFrame(), pd.DataFrame()
         
         # Rankings erstellen mit thematischer Gruppierung
         if 'Thema' in scale_data.columns:
@@ -1239,6 +1352,21 @@ class SchulqualitätsDashboard:
         
         # Top 5 beste Fragen (höchste Bewertungen)
         top_5 = question_rankings.nlargest(5, 'Bewertung')
+        
+        return bottom_5, top_5
+    
+    def create_rankings_visualization(self, data):
+        """Erstellt Top/Bottom Rankings für kritische Bereiche"""
+        if data.empty or 'Bewertung' not in data.columns:
+            st.warning("Keine Bewertungsdaten für Rankings verfügbar.")
+            return
+        
+        # Verwende gecachte Berechnung
+        bottom_5, top_5 = self._calculate_rankings_data(data)
+        
+        if bottom_5.empty and top_5.empty:
+            st.info("Keine Antwortskala-Daten für Rankings verfügbar.")
+            return
         
         col1, col2 = st.columns(2)
         
@@ -1948,64 +2076,100 @@ def main():
         
         if uploaded_files:
             with st.spinner('📊 IQES-Daten werden verarbeitet...'):
-                if dashboard.load_excel_files(uploaded_files):
-                    st.success(f"✅ {len(uploaded_files)} IQES-Dateien erfolgreich geladen!")
-                    
-                    # Filter-Optionen
-                    st.header("🔍 Filter")
-                    
-                    # Bildungsgang-Filter
-                    bildungsgaenge = ['Alle'] + list(dashboard.processed_data['Bildungsgang'].unique())
-                    selected_bildungsgang = st.selectbox("Bildungsgang", bildungsgaenge)
-                    
-                    # Evaluationstyp-Filter
-                    eval_typen = ['Alle'] + list(dashboard.processed_data['Evaluationstyp'].unique())
-                    selected_eval_typ = st.selectbox("Evaluationstyp", eval_typen)
-                    
-                    # Zeitraum-Filter
-                    if not dashboard.processed_data.empty:
-                        min_date = dashboard.processed_data['Datum'].min()
-                        max_date = dashboard.processed_data['Datum'].max()
+                try:
+                    result = dashboard.load_excel_files(uploaded_files)
+                    if result:
+                        st.success(f"✅ {len(uploaded_files)} IQES-Dateien erfolgreich geladen!")
                         
-                        date_range = st.date_input(
-                            "Zeitraum",
-                            value=(min_date, max_date),
-                            min_value=min_date,
-                            max_value=max_date
-                        )
+                        # Filter-Optionen
+                        st.header("🔍 Filter")
                     
-                    # KI-Features Aktivierung
-                    st.header("🤖 KI-Features")
-                    ai_analyzer = KI_Schulqualitäts_Analyzer()
-                    
-                    if ai_analyzer.gemini_client:
-                        st.success("✅ Google Gemini AI verbunden")
+                        # Bildungsgang-Filter
+                        bildungsgaenge = ['Alle'] + list(dashboard.processed_data['Bildungsgang'].unique())
+                        selected_bildungsgang = st.selectbox("Bildungsgang", bildungsgaenge)
+                        
+                        # Evaluationstyp-Filter
+                        eval_typen = ['Alle'] + list(dashboard.processed_data['Evaluationstyp'].unique())
+                        selected_eval_typ = st.selectbox("Evaluationstyp", eval_typen)
+                        
+                        # Zeitraum-Filter
+                        if not dashboard.processed_data.empty:
+                            min_date = dashboard.processed_data['Datum'].min()
+                            max_date = dashboard.processed_data['Datum'].max()
+                            
+                            date_range = st.date_input(
+                                "Zeitraum",
+                                value=(min_date, max_date),
+                                min_value=min_date,
+                                max_value=max_date
+                            )
+                        
+                        # KI-Features Aktivierung (optional)
+                        st.header("🤖 KI-Features")
+                        
                         enable_ai_analysis = st.checkbox(
                             "🧠 KI-Analyse aktivieren", 
-                            value=True,
-                            help="Aktiviert intelligente Textanalyse und automatische Empfehlungen"
+                            value=False,
+                            help="Aktiviert intelligente Textanalyse mit Google Gemini AI. Standard deaktiviert um API-Calls zu vermeiden."
                         )
-                    elif ai_analyzer.openai_client:
-                        st.info("🔄 OpenAI Fallback aktiv")
-                        enable_ai_analysis = st.checkbox("🧠 KI-Analyse aktivieren", value=True)
-                    else:
-                        st.warning("⚠️ Keine KI-Services verfügbar")
-                        enable_ai_analysis = False
-                    
-                    # DEBUG-Informationen anzeigen
-                    with st.expander("🔍 Debug-Informationen", expanded=False):
-                        if hasattr(st.session_state, 'debug_categories'):
-                            st.write("**Gefundene Kategorien:**")
-                            for cat in st.session_state.debug_categories:
-                                st.write(f"• {cat}")
                         
-                        if hasattr(st.session_state, 'debug_themes'):
-                            st.write("**Themen-Zuordnungen:**")
-                            for theme in st.session_state.debug_themes:
-                                st.write(f"• {theme}")
+                        if enable_ai_analysis:
+                            # KI-Analyzer nur bei Bedarf initialisieren
+                            if dashboard.ki_analyzer is None:
+                                try:
+                                    dashboard.ki_analyzer = KI_Schulqualitäts_Analyzer()
+                                    if dashboard.ki_analyzer.gemini_client:
+                                        st.success("✅ Google Gemini AI verbunden")
+                                    elif dashboard.ki_analyzer.openai_client:
+                                        st.info("🔄 OpenAI Fallback aktiv")
+                                    else:
+                                        st.warning("⚠️ Keine KI-Services verfügbar")
+                                        enable_ai_analysis = False
+                                except Exception as e:
+                                    st.error(f"❌ KI-Setup Fehler: {e}")
+                                    enable_ai_analysis = False
+                        else:
+                            st.info("💡 KI-Features deaktiviert (spart API-Calls)")
+                        
+                        # Performance-Tools
+                        st.header("⚡ Performance")
+                        
+                        if st.button("🗑️ Cache leeren", help="Leert den Daten-Cache und erzwingt Neuverarbeitung"):
+                            if 'processed_data' in st.session_state:
+                                del st.session_state.processed_data
+                            if 'data_loaded' in st.session_state:
+                                del st.session_state.data_loaded
+                            if 'last_file_hash' in st.session_state:
+                                del st.session_state.last_file_hash
+                            st.cache_data.clear()
+                            st.success("✅ Cache geleert!")
+                            st.rerun()
+                        
+                        # Memory usage info
+                        if not dashboard.processed_data.empty:
+                            memory_usage = dashboard.processed_data.memory_usage(deep=True).sum() / 1024 / 1024
+                            st.metric("💾 Speicherverbrauch", f"{memory_usage:.1f} MB")
+                            if memory_usage > MAX_MEMORY_MB:
+                                st.warning(f"⚠️ Hoher Speicherverbrauch (>{MAX_MEMORY_MB}MB). Cache leeren empfohlen.")
+                        
+                        # DEBUG-Informationen anzeigen
+                        with st.expander("🔍 Debug-Informationen", expanded=False):
+                            if hasattr(st.session_state, 'debug_categories'):
+                                st.write("**Gefundene Kategorien:**")
+                                for cat in st.session_state.debug_categories:
+                                    st.write(f"• {cat}")
+                            
+                            if hasattr(st.session_state, 'debug_themes'):
+                                st.write("**Themen-Zuordnungen:**")
+                                for theme in st.session_state.debug_themes:
+                                    st.write(f"• {theme}")
                                 
-                else:
-                    st.error("❌ Fehler beim Laden der IQES-Dateien!")
+                    else:
+                        st.error("❌ Fehler beim Laden der IQES-Dateien!")
+                        enable_ai_analysis = False
+                except Exception as e:
+                    st.error(f"❌ Unerwarteter Fehler beim Laden: {str(e)}")
+                    st.info("💡 Versuchen Sie Cache zu leeren oder kontaktieren Sie den Support.")
                     enable_ai_analysis = False
     
     # Hauptbereich
@@ -2134,8 +2298,8 @@ def main():
                         if 'Textantworten' in row and row['Textantworten']:
                             all_text_responses.extend(row['Textantworten'])
                     
-                    if all_text_responses:
-                        text_analysis = ai_analyzer.analyze_german_text_responses(all_text_responses)
+                    if all_text_responses and dashboard.ki_analyzer:
+                        text_analysis = dashboard.ki_analyzer.analyze_german_text_responses(all_text_responses)
                         
                         # Sentiment Analyse
                         if 'sentiment_analysis' in text_analysis:
@@ -2171,9 +2335,12 @@ def main():
             
             # Datenbasierte Empfehlungen
             st.subheader("📊 Intelligente Handlungsempfehlungen")
-            recommendations = ai_analyzer.generate_smart_recommendations(filtered_data)
+            if dashboard.ki_analyzer:
+                recommendations = dashboard.ki_analyzer.generate_smart_recommendations(filtered_data)
+            else:
+                recommendations = []
         
-        if recommendations:
+        if enable_ai_analysis and recommendations:
             for i, rec in enumerate(recommendations):
                 priority_color = {"HOCH": "#ff4444", "MITTEL": "#ff9800", "NIEDRIG": "#4caf50"}[rec['priority']]
                 priority_icon = {"HOCH": "🚨", "MITTEL": "⚠️", "NIEDRIG": "💡"}[rec['priority']]

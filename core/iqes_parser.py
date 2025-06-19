@@ -93,7 +93,13 @@ class IQESParser:
                                  eval_date: pd.Timestamp, bildungsgang: str, 
                                  eval_type: str, filename: str) -> List[Dict]:
         """
-        Verarbeitet ein Antwortskala-Sheet
+        Verarbeitet ein Antwortskala-Sheet nach korrekter IQES-Struktur
+        
+        KORREKTE STRUKTUR:
+        - Thema: df.columns[0] (Spalten-Header)
+        - Fragenummer: aus Sheet-Name extrahiert (z.B. "7")
+        - Unterfragen: ab Zeile 2, Format "X.Y - Text"
+        - Bewertungen: Spalte J (Index 9)
         
         Args:
             df: Excel-Sheet als DataFrame
@@ -107,19 +113,35 @@ class IQESParser:
             Liste von Fragen-Dictionaries
         """
         questions = []
-        question_num = self.extract_question_number(sheet_name)
         
-        # Durch alle Zeilen iterieren (ab Zeile 2, da Zeile 1 meist Header)
+        # 1. THEMA aus Spalten-Header extrahieren (df.columns[0])
+        thema = "Unbekannt"
+        if not df.empty and len(df.columns) > 0:
+            first_column_name = df.columns[0]
+            if pd.notna(first_column_name) and str(first_column_name).strip():
+                thema = str(first_column_name).strip()
+        
+        # 2. FRAGENUMMER aus Sheet-Name extrahieren
+        hauptfrage_num = self.extract_question_number(sheet_name)
+        
+        # 3. UNTERFRAGEN ab Zeile 2 extrahieren
         for idx in range(2, len(df)):
             row = df.iloc[idx]
             
-            # Frage-Text (Spalte A)
+            # Unterfrage-Text aus Spalte A
             if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "":
                 continue
             
             question_text = str(row.iloc[0]).strip()
             
-            # Bewertung (Spalte J - Index 9)
+            # Unterfragen-Nummer aus Text extrahieren (z.B. "7.1", "7.2")
+            unterfrage_num = hauptfrage_num
+            if " - " in question_text:
+                prefix = question_text.split(" - ")[0].strip()
+                if "." in prefix and prefix.replace(".", "").isdigit():
+                    unterfrage_num = prefix
+            
+            # 4. BEWERTUNG aus Spalte J (Index 9) extrahieren
             if len(row) > 9 and pd.notna(row.iloc[9]):
                 try:
                     rating = float(row.iloc[9])
@@ -128,9 +150,12 @@ class IQESParser:
                             'Datum': eval_date,
                             'Bildungsgang': bildungsgang,
                             'Evaluationstyp': eval_type,
-                            'Fragenummer': question_num,
+                            'Thema': thema,  # Aus Spalten-Header
+                            'Hauptfrage': hauptfrage_num,  # z.B. "7"
+                            'Fragenummer': unterfrage_num,  # z.B. "7.1"
                             'Frage': question_text,
                             'Bewertung': rating,
+                            'Fragentyp': 'Antwortskala',
                             'Quelldatei': filename,
                             'Sheet': sheet_name
                         })

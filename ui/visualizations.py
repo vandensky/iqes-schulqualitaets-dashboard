@@ -21,13 +21,13 @@ class IQESVisualizations:
             'info': '#3498db'
         }
     
-    def create_rating_chart(self, data: pd.DataFrame, top_n: int = 10) -> go.Figure:
+    def create_rating_chart(self, data: pd.DataFrame, top_n: int = 5) -> go.Figure:
         """
-        Erstellt Chart für schlechteste Bewertungen
+        Erstellt Chart mit Top 5 beste und Top 5 schlechteste Bewertungen
         
         Args:
             data: IQES-Daten DataFrame
-            top_n: Anzahl der schlechtesten Bewertungen
+            top_n: Anzahl der besten/schlechtesten Bewertungen (Standard: 5)
             
         Returns:
             Plotly Figure
@@ -42,36 +42,67 @@ class IQESVisualizations:
             )
             return fig
         
-        # Top N schlechteste Bewertungen
-        worst_ratings = data.nsmallest(top_n, 'Bewertung')
+        # Top 5 beste und Top 5 schlechteste Bewertungen
+        best_ratings = data.nlargest(top_n, 'Bewertung').copy()
+        worst_ratings = data.nsmallest(top_n, 'Bewertung').copy()
+        
+        # Kombiniere beide DataFrames
+        best_ratings['Kategorie'] = '🟢 Top Bereiche'
+        worst_ratings['Kategorie'] = '🔴 Verbesserungsbereiche'
+        
+        combined_data = pd.concat([worst_ratings, best_ratings])
         
         # Kurze Frage-Labels für bessere Lesbarkeit
-        worst_ratings = worst_ratings.copy()
-        worst_ratings['Frage_Kurz'] = worst_ratings['Frage'].apply(
-            lambda x: x[:60] + "..." if len(x) > 60 else x
+        combined_data['Frage_Label'] = combined_data.apply(
+            lambda row: f"{row['Fragenummer']} - {row['Frage'][:50]}{'...' if len(row['Frage']) > 50 else ''}",
+            axis=1
         )
         
-        fig = px.bar(
-            worst_ratings,
-            x='Bewertung',
-            y='Frage_Kurz',
+        # Farben basierend auf Kategorie
+        color_map = {
+            '🔴 Verbesserungsbereiche': '#e74c3c',
+            '🟢 Top Bereiche': '#27ae60'
+        }
+        
+        fig = go.Figure()
+        
+        # Verbesserungsbereiche (rot)
+        worst_data = combined_data[combined_data['Kategorie'] == '🔴 Verbesserungsbereiche']
+        fig.add_trace(go.Bar(
+            x=worst_data['Bewertung'],
+            y=worst_data['Frage_Label'],
             orientation='h',
-            title=f"🚨 Top {top_n} Kritische Bereiche",
-            color='Bewertung',
-            color_continuous_scale='RdYlGn_r',
-            hover_data=['Bildungsgang', 'Fragenummer']
-        )
+            name='🔴 Verbesserungsbereiche',
+            marker_color='#e74c3c',
+            hovertemplate='<b>%{y}</b><br>Bewertung: %{x:.2f}<br><extra></extra>'
+        ))
+        
+        # Top Bereiche (grün)
+        best_data = combined_data[combined_data['Kategorie'] == '🟢 Top Bereiche']
+        fig.add_trace(go.Bar(
+            x=best_data['Bewertung'],
+            y=best_data['Frage_Label'],
+            orientation='h',
+            name='🟢 Top Bereiche',
+            marker_color='#27ae60',
+            hovertemplate='<b>%{y}</b><br>Bewertung: %{x:.2f}<br><extra></extra>'
+        ))
         
         fig.update_layout(
-            height=500,
+            title=f"📊 Top {top_n} Bereiche & Top {top_n} Verbesserungsbereiche",
+            height=600,
             yaxis={'categoryorder': 'total ascending'},
             xaxis_title="Bewertung (1-4 IQES-Skala)",
-            yaxis_title="Frage"
+            yaxis_title="",
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
         
-        # Kritische Linie bei 2.5
+        # Referenzlinien
         fig.add_vline(x=2.5, line_dash="dash", line_color="red", 
-                      annotation_text="Kritische Grenze")
+                      annotation_text="Kritische Grenze (2.5)")
+        fig.add_vline(x=3.0, line_dash="dash", line_color="orange", 
+                      annotation_text="Zielwert (3.0)")
         
         return fig
     

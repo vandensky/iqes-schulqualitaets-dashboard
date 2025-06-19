@@ -12,7 +12,9 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '.'))
 
 from core.iqes_parser import IQESParser
+from core.timeline_analyzer import IQESTimelineAnalyzer
 from ui.visualizations import IQESVisualizations
+from ui.timeline_visualizations import IQESTimelineVisualizations
 from config.themes import (
     get_theme_for_question, 
     get_rating_category, 
@@ -64,6 +66,7 @@ class ModularIQESDashboard:
     def __init__(self):
         self.parser = IQESParser()
         self.visualizations = IQESVisualizations()
+        self.timeline_visualizations = IQESTimelineVisualizations()
         self.data = pd.DataFrame()
     
     def load_data(self, uploaded_files):
@@ -71,14 +74,29 @@ class ModularIQESDashboard:
         try:
             self.data = self.parser.parse_multiple_files(uploaded_files)
             
-            # Thematische Zuordnung hinzufügen
+            # Zusätzliche Datenaufbereitung für korrekte IQES-Struktur
             if not self.data.empty:
-                self.data['Thema'] = self.data['Fragenummer'].apply(
-                    lambda x: get_theme_for_question(x)['theme']
-                )
-                self.data['Thema_Farbe'] = self.data['Fragenummer'].apply(
-                    lambda x: get_theme_for_question(x)['color']
-                )
+                # Thema ist jetzt korrekt aus Spalten-Header extrahiert
+                # Farbe für Themen zuweisen (basierend auf echten Themen-Namen)
+                def assign_theme_color(thema):
+                    thema_lower = str(thema).lower()
+                    if 'schulatmosphäre' in thema_lower or 'umgang' in thema_lower or 'unterstützung' in thema_lower:
+                        return '#3498db'  # Blau für Schulatmosphäre
+                    elif 'unterricht' in thema_lower:
+                        return '#e74c3c'  # Rot für Unterricht
+                    elif 'feedback' in thema_lower:
+                        return '#f39c12'  # Orange für Feedback
+                    elif 'beschwerdemanagement' in thema_lower or 'ideen' in thema_lower:
+                        return '#27ae60'  # Grün für Beschwerdemanagement
+                    elif 'stärken' in thema_lower or 'schwächen' in thema_lower:
+                        return '#9b59b6'  # Lila für Stärken/Schwächen
+                    elif 'zufriedenheit' in thema_lower:
+                        return '#2ecc71'  # Grün für Zufriedenheit
+                    else:
+                        return '#95a5a6'  # Grau als Standard
+                
+                self.data['Thema_Farbe'] = self.data['Thema'].apply(assign_theme_color)
+                
                 self.data['Bewertungskategorie'] = self.data['Bewertung'].apply(
                     lambda x: get_rating_category(x)['category']
                 )
@@ -179,7 +197,7 @@ class ModularIQESDashboard:
         col1, col2 = st.columns(2)
         
         with col1:
-            st.header("🚨 Kritische Bereiche")
+            st.header("📊 Top & Verbesserungsbereiche")
             chart1 = self.visualizations.create_rating_chart(data)
             st.plotly_chart(chart1, use_container_width=True)
         
@@ -187,6 +205,13 @@ class ModularIQESDashboard:
             st.header("📊 Bildungsgang-Vergleich")
             chart2 = self.visualizations.create_comparison_chart(data)
             st.plotly_chart(chart2, use_container_width=True)
+        
+        # Timeline-Analyse (nur wenn mehrere Zeiträume)
+        timeline_metrics = self.timeline_visualizations.render_timeline_metrics(data)
+        if timeline_metrics.get('timeline_available', False):
+            st.header("📅 Zeitreihenanalyse (Antwortskala 1-4)")
+            st.markdown("*Fokus auf Antwortskala-Fragen für präzise Trend-Analysen*")
+            self.timeline_visualizations.render_timeline_analysis(data)
         
         # Zusätzliche Charts
         col3, col4 = st.columns(2)
@@ -197,9 +222,21 @@ class ModularIQESDashboard:
             st.plotly_chart(chart3, use_container_width=True)
         
         with col4:
-            st.header("📅 Trend-Analyse")
-            chart4 = self.visualizations.create_timeline_chart(data)
-            st.plotly_chart(chart4, use_container_width=True)
+            if not timeline_metrics.get('timeline_available', False):
+                st.header("📊 Basis-Trends")
+                chart4 = self.visualizations.create_timeline_chart(data)
+                st.plotly_chart(chart4, use_container_width=True)
+            else:
+                st.header("📊 Timeline-Übersicht")
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.metric("Multi-Period Fragen", timeline_metrics.get('multi_period_questions', 0))
+                    st.metric("Evaluationszeiträume", timeline_metrics.get('total_periods', 0))
+                with col_b:
+                    st.metric("Antwortskala-Fragen", timeline_metrics.get('scale_questions_count', 0))
+                    trend_direction = timeline_metrics.get('overall_trend_direction', 'unknown')
+                    trend_icon = {"improving": "📈", "declining": "📉", "stable": "➡️"}.get(trend_direction, "❓")
+                    st.metric("Gesamttrend", f"{trend_icon} {trend_direction.title()}")
     
     def render_data_table(self, data):
         """Rendert Daten-Tabelle"""
